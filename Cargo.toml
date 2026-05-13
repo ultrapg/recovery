@@ -1,0 +1,9 @@
+[package]
+name = "recovery"
+version = "1.0.0"
+edition = "2021"
+description = "Raw partition deleted file recovery tool for FAT32, exFAT, NTFS, and ext4"
+license = "MIT"
+repository = "https://github.com/anomalyco/recovery"
+keywords = ["recovery", "forensics", "data-recovery", "ntfs", "fat32", "exfat", "ext4"]
+categories = ["command-line-utilities", "filesystem"]
