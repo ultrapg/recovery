@@ -4,6 +4,39 @@ use crate::types::{DeletedFile, is_directory};
 
 const DIR_ENTRY_SIZE: usize = 32;
 
+// FAT32 boot sector offsets
+const BS_BYTES_PER_SECTOR: usize = 11;
+const BS_SECTORS_PER_CLUSTER: usize = 13;
+const BS_RESERVED_SECTORS: usize = 14;
+const BS_NUM_FATS: usize = 16;
+const BS_ROOT_DIR_ENTRIES: usize = 17;
+const BS_TOTAL_SECTORS_16: usize = 19;
+const BS_SECTORS_PER_FAT_16: usize = 22;
+const BS_TOTAL_SECTORS_32: usize = 32;
+const BS_SECTORS_PER_FAT_32: usize = 36;
+const BS_ROOT_CLUSTER: usize = 44;
+const BS_BOOT_SIGNATURE: usize = 510;
+
+// exFAT boot sector offsets
+const EXFAT_OEM_ID: usize = 3;
+const EXFAT_BPS_SHIFT: usize = 108;
+const EXFAT_SPC_SHIFT: usize = 109;
+const EXFAT_FAT_OFFSET: usize = 80;
+const EXFAT_CLUSTER_HEAP_OFFSET: usize = 88;
+const EXFAT_ROOT_CLUSTER: usize = 96;
+
+// FAT directory entry offsets
+const DIR_ATTR: usize = 11;
+const DIR_FIRST_CLUSTER_HI: usize = 20;
+const DIR_FIRST_CLUSTER_LO: usize = 26;
+const DIR_FILE_SIZE: usize = 28;
+
+// FAT entry constants
+const FAT_ENTRY_FREE: u32 = 0;
+const FAT_ENTRY_END_MIN: u32 = 0x0FFFFFF8;
+
+const FAT_ENTRY_MASK: u32 = 0x0FFFFFFF;
+
 #[derive(Debug, Clone)]
 pub struct Fat32Info {
     pub bytes_per_sector: u16,
@@ -109,22 +142,27 @@ fn utf16_to_string(chars: &[u16]) -> String {
     String::from_utf16_lossy(&filtered)
 }
 
-fn is_deleted_lfn_entry(entry: &[u8; 32]) -> bool { entry[0] == 0xE5 && entry[11] == 0x0F }
-fn is_deleted_short_entry(entry: &[u8; 32]) -> bool { entry[0] == 0xE5 && entry[11] != 0x0F }
+const LFN_ATTR: u8 = 0x0F;
+const DIR_DELETED: u8 = 0xE5;
+const DIR_END: u8 = 0x00;
+const DIR_DOT: u8 = 0x2E;
+
+fn is_deleted_lfn_entry(entry: &[u8; 32]) -> bool { entry[0] == DIR_DELETED && entry[DIR_ATTR] == LFN_ATTR }
+fn is_deleted_short_entry(entry: &[u8; 32]) -> bool { entry[0] == DIR_DELETED && entry[DIR_ATTR] != LFN_ATTR }
 fn is_active_lfn_entry(entry: &[u8; 32]) -> bool {
-    let first = entry[0]; first != 0xE5 && first != 0x00 && entry[11] == 0x0F
+    let first = entry[0]; first != DIR_DELETED && first != DIR_END && entry[DIR_ATTR] == LFN_ATTR
 }
 fn is_active_short_entry(entry: &[u8; 32]) -> bool {
-    let first = entry[0]; first != 0xE5 && first != 0x00 && first != 0x2E && entry[11] != 0x0F
+    let first = entry[0]; first != DIR_DELETED && first != DIR_END && first != DIR_DOT && entry[DIR_ATTR] != LFN_ATTR
 }
-fn is_end_of_dir(entry: &[u8; 32]) -> bool { entry[0] == 0x00 }
+fn is_end_of_dir(entry: &[u8; 32]) -> bool { entry[0] == DIR_END }
 fn get_cluster(entry: &[u8; 32]) -> u32 {
-    let low = u16::from_le_bytes([entry[26], entry[27]]);
-    let high = u16::from_le_bytes([entry[20], entry[21]]);
+    let low = u16::from_le_bytes([entry[DIR_FIRST_CLUSTER_LO], entry[DIR_FIRST_CLUSTER_LO + 1]]);
+    let high = u16::from_le_bytes([entry[DIR_FIRST_CLUSTER_HI], entry[DIR_FIRST_CLUSTER_HI + 1]]);
     (high as u32) << 16 | low as u32
 }
 fn get_file_size(entry: &[u8; 32]) -> u32 {
-    u32::from_le_bytes([entry[28], entry[29], entry[30], entry[31]])
+    u32::from_le_bytes([entry[DIR_FILE_SIZE], entry[DIR_FILE_SIZE + 1], entry[DIR_FILE_SIZE + 2], entry[DIR_FILE_SIZE + 3]])
 }
 
 fn read_cluster_data(
@@ -149,7 +187,7 @@ fn scan_directory(
     let mut pending_active_lfns: Vec<Vec<u16>> = Vec::new();
 
     loop {
-        if cluster >= 0x0FFFFFF8 || cluster < 2 { break; }
+        if cluster >= FAT_ENTRY_END_MIN || cluster < 2 { break; }
         if !visited.insert(cluster) { break; }
         read_cluster_data(file, fs, cluster, &mut cluster_buf)?;
         let entries_count = cluster_size / DIR_ENTRY_SIZE;
@@ -179,12 +217,13 @@ fn scan_directory(
                     let lba = fs.data_region_lba() + (start_cluster as u64 - 2) * fs.sectors_per_cluster as u64;
                     lba * fs.bytes_per_sector as u64
                 } else { 0 };
-                let attr = entry[11];
+                let attr = entry[DIR_ATTR];
 
                 results.push(DeletedFile {
                     name, size, start_address: start_addr,
                     fs_type: "FAT32".into(), path: current_path.to_string(),
                     is_directory: is_directory(attr), resident_data: None,
+                    data_runs: vec![],
                 });
                 pending_deleted_lfns.clear(); continue;
             }
@@ -204,13 +243,13 @@ fn scan_directory(
                 } else { extract_83_name(&entry) };
                 pending_active_lfns.clear(); pending_deleted_lfns.clear();
 
-                let attr = entry[11];
+                let attr = entry[DIR_ATTR];
                 let entry_cluster = get_cluster(&entry);
                 let is_dir = is_directory(attr);
 
                 if is_dir {
                     let first_byte = entry[0];
-                    if first_byte == 0x2E || entry_cluster == 0 || entry_cluster == start_cluster { continue; }
+                    if first_byte == DIR_DOT || entry_cluster == 0 || entry_cluster == start_cluster { continue; }
                     let sub_path = if current_path.is_empty() { name }
                         else { format!("{}/{}", current_path, name) };
                     let _ = scan_directory(file, fs, entry_cluster, &sub_path, results);
@@ -223,8 +262,8 @@ fn scan_directory(
 
         let mut fat_buf = [0u8; 4];
         read_bytes(file, fs.fat_entry_offset(cluster), &mut fat_buf)?;
-        let fat_entry = u32::from_le_bytes(fat_buf) & 0x0FFFFFFF;
-        if fat_entry >= 0x0FFFFFF8 || fat_entry == 0 { break; }
+        let fat_entry = u32::from_le_bytes(fat_buf) & FAT_ENTRY_MASK;
+        if fat_entry >= FAT_ENTRY_END_MIN || fat_entry == FAT_ENTRY_FREE { break; }
         cluster = fat_entry;
     }
     Ok(())
@@ -260,8 +299,7 @@ fn scan_directory_exfat(
                 let mut name = String::new();
                 let mut size = 0u64;
                 let mut start_cluster_val = 0u32;
-                let attr = entry[3];
-                let mut _name_len = 0u8;
+                let attr = entry[3];  // exFAT primary entry attribute byte
 
                 let max_secondary = 20.min(entries_count - i - 1);
                 let mut secondary_count = 0usize;
@@ -276,7 +314,6 @@ fn scan_directory_exfat(
 
                     if sub[2] == 0 && sub[3] > 0 {
                         // Stream extension entry
-                        _name_len = sub[3];
                         size = u64::from_le_bytes([sub[24], sub[25], sub[26], sub[27], 0, 0, 0, 0]);
                         let c = u32::from_le_bytes([sub[20], sub[21], sub[22], sub[23]]);
                         if c >= 2 { start_cluster_val = c; }
@@ -310,6 +347,7 @@ fn scan_directory_exfat(
                     name, size, start_address: start_addr,
                     fs_type: "exFAT".into(), path: current_path.to_string(),
                     is_directory: is_directory(attr), resident_data: None,
+                    data_runs: vec![],
                 });
             } else if entry_type & 0x01 != 0 && (entry_type & 0x80 == 0 || entry_type == 0x85) {
                 // Active primary entry – recurse into subdirectories
@@ -357,39 +395,39 @@ fn scan_directory_exfat(
         // Follow cluster chain via FAT for next iteration
         let mut fat_buf = [0u8; 4];
         if read_bytes(file, fs.fat_entry_offset(cluster), &mut fat_buf).is_err() { break; }
-        let fat_entry = u32::from_le_bytes(fat_buf) & 0x0FFFFFFF;
-        if fat_entry >= 0x0FFFFFF8 || fat_entry == 0 { break; }
+        let fat_entry = u32::from_le_bytes(fat_buf) & FAT_ENTRY_MASK;
+        if fat_entry >= FAT_ENTRY_END_MIN || fat_entry == FAT_ENTRY_FREE { break; }
         cluster = fat_entry;
     }
     Ok(())
 }
 
 fn parse_fat32_boot(boot: &[u8; 512]) -> Option<Fat32Info> {
-    if boot[510] != 0x55 || boot[511] != 0xAA { return None; }
-    let bytes_per_sector = u16::from_le_bytes([boot[11], boot[12]]);
+    if boot[BS_BOOT_SIGNATURE] != 0x55 || boot[BS_BOOT_SIGNATURE + 1] != 0xAA { return None; }
+    let bytes_per_sector = u16::from_le_bytes([boot[BS_BYTES_PER_SECTOR], boot[BS_BYTES_PER_SECTOR + 1]]);
     if bytes_per_sector < 512 || bytes_per_sector > 4096 || !bytes_per_sector.is_power_of_two() { return None; }
-    let sectors_per_cluster = boot[13];
+    let sectors_per_cluster = boot[BS_SECTORS_PER_CLUSTER];
     if sectors_per_cluster == 0 || !sectors_per_cluster.is_power_of_two() { return None; }
-    let reserved_sectors = u16::from_le_bytes([boot[14], boot[15]]);
-    let num_fats = boot[16];
+    let reserved_sectors = u16::from_le_bytes([boot[BS_RESERVED_SECTORS], boot[BS_RESERVED_SECTORS + 1]]);
+    let num_fats = boot[BS_NUM_FATS];
     if num_fats == 0 { return None; }
 
-    let total_sectors_16 = u16::from_le_bytes([boot[19], boot[20]]);
-    let sectors_per_fat_16 = u16::from_le_bytes([boot[22], boot[23]]);
-    let total_sectors_32 = u32::from_le_bytes([boot[32], boot[33], boot[34], boot[35]]);
-    let sectors_per_fat_32 = u32::from_le_bytes([boot[36], boot[37], boot[38], boot[39]]);
+    let total_sectors_16 = u16::from_le_bytes([boot[BS_TOTAL_SECTORS_16], boot[BS_TOTAL_SECTORS_16 + 1]]);
+    let sectors_per_fat_16 = u16::from_le_bytes([boot[BS_SECTORS_PER_FAT_16], boot[BS_SECTORS_PER_FAT_16 + 1]]);
+    let total_sectors_32 = u32::from_le_bytes([boot[BS_TOTAL_SECTORS_32], boot[BS_TOTAL_SECTORS_32 + 1], boot[BS_TOTAL_SECTORS_32 + 2], boot[BS_TOTAL_SECTORS_32 + 3]]);
+    let sectors_per_fat_32 = u32::from_le_bytes([boot[BS_SECTORS_PER_FAT_32], boot[BS_SECTORS_PER_FAT_32 + 1], boot[BS_SECTORS_PER_FAT_32 + 2], boot[BS_SECTORS_PER_FAT_32 + 3]]);
 
     let sectors_per_fat = if sectors_per_fat_16 != 0 { sectors_per_fat_16 as u32 } else { sectors_per_fat_32 };
-    let _total_sectors = if total_sectors_16 != 0 { total_sectors_16 as u32 } else { total_sectors_32 };
-    if sectors_per_fat == 0 || _total_sectors == 0 { return None; }
+    let total_sectors = if total_sectors_16 != 0 { total_sectors_16 as u32 } else { total_sectors_32 };
+    if sectors_per_fat == 0 || total_sectors == 0 { return None; }
 
-    let root_dir_entries = u16::from_le_bytes([boot[17], boot[18]]);
-    let data_sectors = _total_sectors - reserved_sectors as u32 - (num_fats as u32 * sectors_per_fat)
+    let root_dir_entries = u16::from_le_bytes([boot[BS_ROOT_DIR_ENTRIES], boot[BS_ROOT_DIR_ENTRIES + 1]]);
+    let data_sectors = total_sectors - reserved_sectors as u32 - (num_fats as u32 * sectors_per_fat)
         - (root_dir_entries as u32 * 32 + bytes_per_sector as u32 - 1) / bytes_per_sector as u32;
     let total_clusters = data_sectors / sectors_per_cluster as u32;
     if total_clusters < 65525 { return None; }
 
-    let root_cluster = u32::from_le_bytes([boot[44], boot[45], boot[46], boot[47]]);
+    let root_cluster = u32::from_le_bytes([boot[BS_ROOT_CLUSTER], boot[BS_ROOT_CLUSTER + 1], boot[BS_ROOT_CLUSTER + 2], boot[BS_ROOT_CLUSTER + 3]]);
     if root_cluster < 2 { return None; }
 
     Some(Fat32Info {
@@ -403,27 +441,22 @@ pub fn probe_fat32_from_buf(buf: &[u8; 512]) -> Option<Fat32Info> {
 }
 
 fn parse_exfat_boot(boot: &[u8; 512]) -> Option<ExfatInfo> {
-    if boot[510] != 0x55 || boot[511] != 0xAA { return None; }
-    if &boot[3..11] != b"EXFAT   " { return None; }
+    if boot[BS_BOOT_SIGNATURE] != 0x55 || boot[BS_BOOT_SIGNATURE + 1] != 0xAA { return None; }
+    if &boot[EXFAT_OEM_ID..EXFAT_OEM_ID + 8] != b"EXFAT   " { return None; }
 
-    // Bytes per sector shift at offset 108 (0x6C)
-    let bps_shift = boot[108];
+    let bps_shift = boot[EXFAT_BPS_SHIFT];
     if bps_shift < 9 || bps_shift > 12 { return None; }
     let bytes_per_sector = (1u16) << bps_shift;
 
-    // Sectors per cluster shift at offset 109 (0x6D)
-    let spc_shift = boot[109] & 0x0F;
+    let spc_shift = boot[EXFAT_SPC_SHIFT] & 0x0F;
     let sectors_per_cluster = (1u32) << spc_shift;
     if sectors_per_cluster == 0 || sectors_per_cluster > 2048 { return None; }
 
-    // FAT offset at offset 80 (0x50)
-    let fat_offset = u32::from_le_bytes([boot[80], boot[81], boot[82], boot[83]]);
+    let fat_offset = u32::from_le_bytes([boot[EXFAT_FAT_OFFSET], boot[EXFAT_FAT_OFFSET + 1], boot[EXFAT_FAT_OFFSET + 2], boot[EXFAT_FAT_OFFSET + 3]]);
 
-    // Cluster heap offset at offset 88 (0x58)
-    let cluster_heap_offset = u32::from_le_bytes([boot[88], boot[89], boot[90], boot[91]]);
+    let cluster_heap_offset = u32::from_le_bytes([boot[EXFAT_CLUSTER_HEAP_OFFSET], boot[EXFAT_CLUSTER_HEAP_OFFSET + 1], boot[EXFAT_CLUSTER_HEAP_OFFSET + 2], boot[EXFAT_CLUSTER_HEAP_OFFSET + 3]]);
 
-    // Root directory cluster at offset 96 (0x60)
-    let root_cluster = u32::from_le_bytes([boot[96], boot[97], boot[98], boot[99]]);
+    let root_cluster = u32::from_le_bytes([boot[EXFAT_ROOT_CLUSTER], boot[EXFAT_ROOT_CLUSTER + 1], boot[EXFAT_ROOT_CLUSTER + 2], boot[EXFAT_ROOT_CLUSTER + 3]]);
     if root_cluster < 2 { return None; }
 
     Some(ExfatInfo { bytes_per_sector, sectors_per_cluster, cluster_heap_offset, root_cluster, fat_offset, partition_offset: 0 })
@@ -454,8 +487,11 @@ fn read_fat_entry(file: &mut File, fs: &Fat32Info, cluster: u32) -> Result<u32, 
 pub fn restore_fat32(
     file: &mut File, fs: &Fat32Info, entry: &DeletedFile, target_path: &str,
 ) -> Result<(), String> {
-    let cluster = (entry.start_address - fs.data_region_lba() * fs.bytes_per_sector as u64)
-        / fs.bytes_per_cluster() + 2;
+    let data_start = fs.data_region_lba() * fs.bytes_per_sector as u64;
+    if entry.start_address < data_start {
+        return Err(format!("Invalid start_address 0x{:X} (before data region)", entry.start_address));
+    }
+    let cluster = (entry.start_address - data_start) / fs.bytes_per_cluster() + 2;
     if cluster < 2 { return Err("Invalid cluster from start_address".into()); }
     let cluster = cluster as u32;
 
@@ -484,12 +520,11 @@ pub fn restore_fat32(
 
         // Follow FAT chain (preserved for deleted files on FAT32)
         let fat_entry = read_fat_entry(file, fs, current_cluster)?;
-        if fat_entry >= 0x0FFFFFF8 || fat_entry == 0 {
+        if fat_entry >= FAT_ENTRY_END_MIN || fat_entry == FAT_ENTRY_FREE {
             eprintln!("  Warning: FAT chain ends at cluster {}", current_cluster);
             break;
         }
         if fat_entry < 2 {
-            eprintln!("  Warning: Invalid FAT entry 0x{:X} at cluster {}", fat_entry, current_cluster);
             break;
         }
         current_cluster = fat_entry;
@@ -509,9 +544,12 @@ pub fn restore_exfat(
 ) -> Result<(), String> {
     let cluster_size = fs.bytes_per_cluster() as usize;
     let data_start = fs.cluster_heap_offset as u64 * fs.bytes_per_sector as u64;
+    if entry.start_address < data_start {
+        return Err(format!("Invalid start_address 0x{:X} (before cluster heap)", entry.start_address));
+    }
     let mut buf = vec![0u8; cluster_size];
     let mut remaining = entry.size as usize;
-    let mut current_cluster = (entry.start_address.saturating_sub(data_start)) / (cluster_size as u64) + 2;
+    let mut current_cluster = (entry.start_address - data_start) / (cluster_size as u64) + 2;
     if current_cluster < 2 { return Err("Cannot compute exFAT cluster".into()); }
 
     let out_path = std::path::Path::new(target_path);
@@ -533,7 +571,7 @@ pub fn restore_exfat(
 
         // Follow FAT chain (preserved for deleted files on exFAT)
         let fat_entry = read_exfat_fat_entry(file, fs, current_cluster as u32)?;
-        if fat_entry == 0 || fat_entry >= 0x0FFFFFF8 {
+        if fat_entry == FAT_ENTRY_FREE || fat_entry >= FAT_ENTRY_END_MIN {
             eprintln!("  Warning: FAT chain ends at cluster {}", current_cluster);
             break;
         }
