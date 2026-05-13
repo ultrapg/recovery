@@ -7,6 +7,7 @@ pub struct DeletedFile {
     pub path: String,
     pub is_directory: bool,
     pub resident_data: Option<Vec<u8>>,
+    pub data_runs: Vec<(u64, u64)>,
 }
 
 pub fn is_directory(attr: u8) -> bool {
