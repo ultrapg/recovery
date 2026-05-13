@@ -115,13 +115,14 @@ fn scan_dir_block(
 
         if inode == 0 {
             // Deleted entry
-            let name_clean: String = name.chars().filter(|c| c.is_ascii_graphic() || *c == ' ' || *c == '.' || *c == '-' || *c == '_').collect();
+            let name_clean: String = name.chars().filter(|c| c.is_alphanumeric() || c.is_ascii_punctuation() || *c == ' ').collect();
             if name_clean.is_empty() || name_clean == "." || name_clean == ".." { pos += rec_len; continue; }
 
             results.push(DeletedFile {
                 name: name_clean, size: 0, start_address: 0,
                 fs_type: "ext4".into(), path: current_path.to_string(),
                 is_directory: false, resident_data: None,
+                data_runs: vec![],
             });
         } else if name != "." && name != ".." {
             // Active entry - try to recurse if directory
