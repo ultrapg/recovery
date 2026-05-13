@@ -15,25 +15,19 @@ use std::os::windows::fs::OpenOptionsExt;
 use types::DeletedFile;
 
 fn open_device(path: &str) -> Result<File, String> {
-    let file = if cfg!(target_os = "windows") {
-        #[cfg(target_os = "windows")]
-        {
-            OpenOptions::new()
-                .read(true).write(false).share_mode(0x7)
-                .custom_flags(0)
-                .open(path)
-                .map_err(|e| format!("Cannot open {}. Run as Administrator. Error: {}", path, e))
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            OpenOptions::new().read(true).open(path)
-                .map_err(|e| format!("Cannot open {}. Try with sudo. Error: {}", path, e))
-        }
-    } else {
+    #[cfg(target_os = "windows")]
+    {
+        OpenOptions::new()
+            .read(true).write(false).share_mode(0x7)
+            .custom_flags(0)
+            .open(path)
+            .map_err(|e| format!("Cannot open {}. Run as Administrator. Error: {}", path, e))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
         OpenOptions::new().read(true).open(path)
             .map_err(|e| format!("Cannot open {}. Try with sudo. Error: {}", path, e))
-    }?;
-    Ok(file)
+    }
 }
 
 fn resolve_path(input: &str) -> (String, String) {
@@ -123,24 +117,25 @@ fn print_table(results: &[DeletedFile]) {
     max_path_len = max_path_len.min(40);
 
     let status_col = "Status".len().max(12);
-    let total_width = status_col + 2 + max_name_len + 2 + max_size_len + 2
-        + max_addr_len + 2 + max_path_len + 2 + max_fs_len + 2;
-    let sep = "─".repeat(total_width);
+    let total_width = status_col + 3 + max_name_len + 3 + max_size_len + 3
+        + max_addr_len + 3 + max_path_len + 3 + max_fs_len + 1;
+    let _sep = "-".repeat(total_width);
 
     println!("\nDeleted Files:");
-    println!("┌{}┐", sep);
-    print!("│ {:width$} │", "Status", width = status_col);
-    print!(" {:width$} │", "Name", width = max_name_len);
-    print!(" {:>width$} │", "Size", width = max_size_len);
-    print!(" {:width$} │", "Start Address", width = max_addr_len);
-    print!(" {:width$} │", "FS", width = max_fs_len);
-    println!(" {:width$} │", "Path", width = max_path_len);
-    println!("├{}┤", sep);
+    let hline = |c, n, s, a, f, p| format!("+{0}+{1}+{2}+{3}+{4}+{5}+", c, n, s, a, f, p);
+    let h = hline(sep_line(status_col), sep_line(max_name_len), sep_line(max_size_len), sep_line(max_addr_len), sep_line(max_fs_len), sep_line(max_path_len));
+    println!("\nDeleted Files:");
+    println!("{}", h);
+    print!("| {:1$} |", "Status", status_col);
+    print!(" {:1$} |", "Name", max_name_len);
+    print!(" {:>1$} |", "Size", max_size_len);
+    print!(" {:1$} |", "Start Address", max_addr_len);
+    print!(" {:1$} |", "FS", max_fs_len);
+    println!(" {:1$} |", "Path", max_path_len);
+    println!("{}", h);
 
     for f in results {
         let status = if f.is_directory { "Deleted (Dir)" } else { "Deleted" };
-        let size_str = format!("{}", f.size);
-        let addr_str = format!("0x{:08X}", f.start_address);
 
         let name_display = if f.name.len() > max_name_len {
             format!("{}...", &f.name[..max_name_len.saturating_sub(3)])
@@ -150,15 +145,15 @@ fn print_table(results: &[DeletedFile]) {
             format!("...{}", &f.path[f.path.len().saturating_sub(max_path_len - 3)..])
         } else { f.path.clone() };
 
-        print!("│ {:width$} │", status, width = status_col);
-        print!(" {:width$} │", name_display, width = max_name_len);
-        print!(" {:>width$} │", size_str, width = max_size_len);
-        print!(" {:width$} │", addr_str, width = max_addr_len);
-        print!(" {:width$} │", f.fs_type, width = max_fs_len);
-        println!(" {:width$} │", path_display, width = max_path_len);
+        print!("| {:1$} |", status, status_col);
+        print!(" {:1$} |", name_display, max_name_len);
+        print!(" {:>1$} |", f.size.to_string(), max_size_len);
+        print!(" {:1$} |", format!("0x{:08X}", f.start_address), max_addr_len);
+        print!(" {:1$} |", f.fs_type, max_fs_len);
+        println!(" {:1$} |", path_display, max_path_len);
     }
 
-    println!("└{}┘", sep);
+    println!("{}", h);
     println!("\nFound {} deleted entr{}.", results.len(), if results.len() == 1 { "y" } else { "ies" });
 }
 
@@ -181,6 +176,40 @@ fn print_help(exe: &str) {
     );
 }
 
+fn parse_flag_value<T: std::str::FromStr>(args: &[String], flag: &str, desc: &str) -> Option<T> {
+    args.iter().position(|a| a == flag).and_then(|i| {
+        match args.get(i + 1) {
+            None => {
+                eprintln!("ERROR: {} requires {} argument", flag, desc);
+                std::process::exit(1);
+            }
+            Some(val) => match val.parse::<T>() {
+                Ok(v) => Some(v),
+                Err(_) => {
+                    eprintln!("ERROR: {} value '{}' is not a valid {}", flag, val, desc);
+                    std::process::exit(1);
+                }
+            },
+        }
+    })
+}
+
+fn sep_line(len: usize) -> String {
+    "-".repeat(len + 2)
+}
+
+fn parse_flag_str<'a>(args: &'a [String], flag: &str, desc: &str) -> Option<&'a str> {
+    args.iter().position(|a| a == flag).and_then(|i| {
+        match args.get(i + 1) {
+            None => {
+                eprintln!("ERROR: {} requires {} argument", flag, desc);
+                std::process::exit(1);
+            }
+            Some(val) => Some(val.as_str()),
+        }
+    })
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let exe = args.get(0).map(|s| s.as_str()).unwrap_or("recovery");
@@ -191,18 +220,9 @@ fn main() {
     }
 
     let input_path = &args[1];
-    let restore_index: Option<usize> = args.iter()
-        .position(|a| a == "--restore")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse().ok());
-    let output_path: Option<&str> = args.iter()
-        .position(|a| a == "--output")
-        .and_then(|i| args.get(i + 1))
-        .map(|s| s.as_str());
-    let search_filter: Option<&str> = args.iter()
-        .position(|a| a == "--search")
-        .and_then(|i| args.get(i + 1))
-        .map(|s| s.as_str());
+    let restore_index = parse_flag_value::<usize>(&args, "--restore", "numeric INDEX");
+    let output_path = parse_flag_str(&args, "--output", "PATH");
+    let search_filter = parse_flag_str(&args, "--search", "NAME");
 
     let (device_path, filter_path) = resolve_path(input_path);
 
@@ -223,7 +243,7 @@ fn main() {
         Ok(f) => f,
         Err(e) => {
             eprintln!("ERROR: {}", e);
-            if device_path == "\\\\.\\C:" || device_path.to_uppercase().starts_with("\\\\.\\C:") {
+            if device_path.to_uppercase().starts_with("\\\\.\\C:") {
                 eprintln!();
                 eprintln!("C: is the Windows system drive and cannot be opened for raw access while Windows is running.");
                 eprintln!("This is an OS-level restriction.");
