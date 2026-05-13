@@ -121,7 +121,6 @@ fn print_table(results: &[DeletedFile]) {
         + max_addr_len + 3 + max_path_len + 3 + max_fs_len + 1;
     let _sep = "-".repeat(total_width);
 
-    println!("\nDeleted Files:");
     let hline = |c, n, s, a, f, p| format!("+{0}+{1}+{2}+{3}+{4}+{5}+", c, n, s, a, f, p);
     let h = hline(sep_line(status_col), sep_line(max_name_len), sep_line(max_size_len), sep_line(max_addr_len), sep_line(max_fs_len), sep_line(max_path_len));
     println!("\nDeleted Files:");
@@ -265,11 +264,9 @@ fn main() {
     // Disk-level scanning for \\.\PhysicalDriveN
     if device_path.starts_with("\\\\.\\PhysicalDrive") {
         eprintln!("Scanning physical disk for all partitions...\n");
-        let mut all: Vec<DeletedFile> = Vec::new();
-        disk::scan_disk(&mut file, &mut all);
-        let results: Vec<DeletedFile> = all.into_iter()
-            .filter(|f| matches_search(&f.name, search_filter))
-            .collect();
+        let mut results: Vec<DeletedFile> = Vec::new();
+        disk::scan_disk(&mut file, &mut results);
+        results.retain(|f| matches_search(&f.name, search_filter));
         if restore_index.is_some() {
             eprintln!("Restore from PhysicalDrive path not supported directly.\nUse the volume path (e.g. \\\\.\\E:) after identifying the right partition.");
         } else {
@@ -290,14 +287,12 @@ fn main() {
         if let Some(info) = fat::probe_fat32_from_buf(&boot) {
             eprintln!("Detected: FAT32 (bytes/sector={}, sectors/cluster={}, root cluster={})",
                 info.bytes_per_sector, info.sectors_per_cluster, info.root_cluster);
-            let mut all: Vec<DeletedFile> = Vec::new();
-            if let Err(e) = fat::scan_fat32(&mut file, &info, &mut all) {
+            let mut results: Vec<DeletedFile> = Vec::new();
+            if let Err(e) = fat::scan_fat32(&mut file, &info, &mut results) {
                 eprintln!("Scan error: {}", e);
             }
-            let results: Vec<DeletedFile> = all.into_iter()
-                .filter(|f| matches_path(&f.path, &filter_path))
-                .filter(|f| matches_search(&f.name, search_filter))
-                .collect();
+            results.retain(|f| matches_path(&f.path, &filter_path));
+            results.retain(|f| matches_search(&f.name, search_filter));
             handle_results(results, restore_index, output_path,
                 |entry, target| fat::restore_fat32(&mut file, &info, entry, target));
             return;
@@ -307,14 +302,12 @@ fn main() {
         if let Some(info) = fat::probe_exfat_from_buf(&boot) {
             eprintln!("Detected: exFAT (bytes/sector={}, sectors/cluster={}, root cluster={})",
                 info.bytes_per_sector, info.sectors_per_cluster, info.root_cluster);
-            let mut all: Vec<DeletedFile> = Vec::new();
-            if let Err(e) = fat::scan_exfat(&mut file, &info, &mut all) {
+            let mut results: Vec<DeletedFile> = Vec::new();
+            if let Err(e) = fat::scan_exfat(&mut file, &info, &mut results) {
                 eprintln!("Scan error: {}", e);
             }
-            let results: Vec<DeletedFile> = all.into_iter()
-                .filter(|f| matches_path(&f.path, &filter_path))
-                .filter(|f| matches_search(&f.name, search_filter))
-                .collect();
+            results.retain(|f| matches_path(&f.path, &filter_path));
+            results.retain(|f| matches_search(&f.name, search_filter));
             handle_results(results, restore_index, output_path,
                 |entry, target| fat::restore_exfat(&mut file, &info, entry, target));
             return;
@@ -324,16 +317,14 @@ fn main() {
         if let Some(info) = ntfs::probe_from_buf(&boot) {
             eprintln!("Detected: NTFS (MFT at offset 0x{:X}, record size={})",
                 info.mft_start, info.mft_record_size);
-            let mut all: Vec<DeletedFile> = Vec::new();
-            if let Err(e) = ntfs::scan(&mut file, &info, &mut all) {
+            let mut results: Vec<DeletedFile> = Vec::new();
+            if let Err(e) = ntfs::scan(&mut file, &info, &mut results) {
                 eprintln!("Scan error: {}", e);
             }
             if !filter_path.is_empty() {
                 eprintln!("  Note: path filtering not supported for NTFS (showing all results)");
             }
-            let results: Vec<DeletedFile> = all.into_iter()
-                .filter(|f| matches_search(&f.name, search_filter))
-                .collect();
+            results.retain(|f| matches_search(&f.name, search_filter));
             handle_results(results, restore_index, output_path,
                 |entry, target| ntfs::restore(&mut file, &info, entry, target));
             return;
@@ -343,14 +334,12 @@ fn main() {
     // ext4 superblock is at offset 1024, not in the first 512 bytes
     if let Some(info) = ext::probe(&mut file) {
         eprintln!("Detected: ext4 (block size={})", info.block_size);
-        let mut all: Vec<DeletedFile> = Vec::new();
-        if let Err(e) = ext::scan(&mut file, &info, &mut all) {
+        let mut results: Vec<DeletedFile> = Vec::new();
+        if let Err(e) = ext::scan(&mut file, &info, &mut results) {
             eprintln!("Scan error: {}", e);
         }
-        let results: Vec<DeletedFile> = all.into_iter()
-            .filter(|f| matches_path(&f.path, &filter_path))
-            .filter(|f| matches_search(&f.name, search_filter))
-            .collect();
+        results.retain(|f| matches_path(&f.path, &filter_path));
+        results.retain(|f| matches_search(&f.name, search_filter));
         handle_results(results, restore_index, output_path,
             |_, _| Err("ext4 restore not supported".into()));
         return;
