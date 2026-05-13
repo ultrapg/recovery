@@ -6,11 +6,25 @@ use crate::ntfs;
 use crate::ext;
 
 pub const MBR_SIGNATURE: u16 = 0xAA55;
+pub const MBR_PARTITION_TABLE_OFFSET: usize = 446;
+pub const MBR_PARTITION_ENTRY_SIZE: usize = 16;
+
+pub const GPT_HEADER_LBA: u64 = 1;
+pub const GPT_PARTITION_ENTRY_LBA_OFFSET: usize = 72;
+pub const GPT_NUM_ENTRIES_OFFSET: usize = 80;
+pub const GPT_ENTRY_SIZE_OFFSET: usize = 84;
+
+pub const GPT_PARTITION_START_LBA_OFFSET: usize = 32;
+pub const GPT_PARTITION_END_LBA_OFFSET: usize = 40;
+pub const GPT_PARTITION_NAME_OFFSET: usize = 56;
+pub const GPT_PARTITION_NAME_LEN: usize = 72;
+
+pub const GUID_EMPTY: &str = "00000000-0000-0000-0000-000000000000";
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Partition {
     pub start_lba: u64,
+    #[allow(dead_code)]
     pub num_sectors: u64,
     pub fs_type_byte: u8,
     pub label: String,
@@ -30,7 +44,7 @@ pub fn parse_mbr(buf: &[u8; 512]) -> Vec<Partition> {
         return parts;
     }
     for i in 0..4 {
-        let off = 446 + i * 16;
+        let off = MBR_PARTITION_TABLE_OFFSET + i * MBR_PARTITION_ENTRY_SIZE;
         let fs_type = buf[off + 4];
         let start_lba = read_u32_le(buf, off + 8) as u64;
         let num_sectors = read_u32_le(buf, off + 12) as u64;
@@ -98,7 +112,7 @@ const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
 
 fn read_gpt_partition_name(buf: &[u8], off: usize) -> String {
     let mut name_utf16 = Vec::new();
-    for i in (0..72).step_by(2) {
+    for i in (0..GPT_PARTITION_NAME_LEN).step_by(2) {
         let ch = u16::from_le_bytes([buf[off + i], buf[off + i + 1]]);
         if ch == 0 { break; }
         name_utf16.push(ch);
@@ -125,7 +139,7 @@ fn fs_type_from_gpt_guid(guid: &str) -> &'static str {
 
 pub fn parse_gpt(file: &mut File) -> Vec<Partition> {
     let mut gpt_hdr = [0u8; 512];
-    if !read_at(file, 512, &mut gpt_hdr) {
+    if !read_at(file, GPT_HEADER_LBA * 512, &mut gpt_hdr) {
         eprintln!("Cannot read GPT header at LBA 1");
         return vec![];
     }
@@ -134,10 +148,10 @@ pub fn parse_gpt(file: &mut File) -> Vec<Partition> {
         return vec![];
     }
 
-    let partition_entry_lba = read_u64_le(&gpt_hdr, 72);
-    let num_entries = read_u32_le(&gpt_hdr, 80) as usize;
-    let mut entry_size = read_u32_le(&gpt_hdr, 84) as usize;
-    if entry_size == 0 { entry_size = 128; }
+    let partition_entry_lba = read_u64_le(&gpt_hdr, GPT_PARTITION_ENTRY_LBA_OFFSET);
+    let num_entries = read_u32_le(&gpt_hdr, GPT_NUM_ENTRIES_OFFSET) as usize;
+    let mut entry_size = read_u32_le(&gpt_hdr, GPT_ENTRY_SIZE_OFFSET) as usize;
+    if entry_size == 0 || entry_size < 128 { entry_size = 128; }
 
     eprintln!("GPT: {} partition entries at LBA {}, entry size {}",
         num_entries, partition_entry_lba, entry_size);
@@ -158,18 +172,18 @@ pub fn parse_gpt(file: &mut File) -> Vec<Partition> {
 
     for i in 0..num_entries {
         let off = i * entry_size;
-        if off + 16 > buf.len() { break; }
+        if off + 128 > buf.len() { break; }
 
         let type_guid = guid_to_string(&buf, off);
-        if type_guid == "00000000-0000-0000-0000-000000000000" {
+        if type_guid == GUID_EMPTY {
             // Unused entry
             continue;
         }
 
-        let start_lba = read_u64_le(&buf, off + 32);
-        let end_lba = read_u64_le(&buf, off + 40);
+        let start_lba = read_u64_le(&buf, off + GPT_PARTITION_START_LBA_OFFSET);
+        let end_lba = read_u64_le(&buf, off + GPT_PARTITION_END_LBA_OFFSET);
         let num_sectors = end_lba.saturating_sub(start_lba) + 1;
-        let name = read_gpt_partition_name(&buf, off + 56);
+        let name = read_gpt_partition_name(&buf, off + GPT_PARTITION_NAME_OFFSET);
         let fs_label = fs_type_from_gpt_guid(&type_guid);
 
         let label = if name.is_empty() {
