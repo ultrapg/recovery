@@ -80,19 +80,62 @@ fn read_block(file: &mut File, info: &ExtInfo, block_num: u64, buf: &mut [u8]) -
     read_bytes(file, offset, buf)
 }
 
-fn get_inode_blocks(inode: &[u8]) -> Vec<u64> {
-    if inode.len() < 0x64 { return vec![]; }
-    let mut blocks = Vec::new();
-    // i_block array starts at offset 0x28, has 15 entries
-    // For ext4 without 64bit feature, each entry is u32
-    for i in 0..15 {
-        let off = 0x28 + i * 4;
-        if off + 4 > inode.len() { break; }
-        let block = u32::from_le_bytes([inode[off], inode[off+1], inode[off+2], inode[off+3]]);
-        if block != 0 {
-            blocks.push(block as u64);
-        }
+fn read_indirect_block(file: &mut File, info: &ExtInfo, block_num: u64, blocks: &mut Vec<u64>) {
+    let ptrs_per_block = info.block_size as usize / 4;
+    let mut buf = vec![0u8; info.block_size as usize];
+    if read_block(file, info, block_num, &mut buf).is_err() { return; }
+    for i in 0..ptrs_per_block {
+        let ptr = u32::from_le_bytes([buf[i*4], buf[i*4+1], buf[i*4+2], buf[i*4+3]]);
+        if ptr != 0 { blocks.push(ptr as u64); }
     }
+}
+
+fn read_doubly_indirect(file: &mut File, info: &ExtInfo, block_num: u64, blocks: &mut Vec<u64>) {
+    let ptrs_per_block = info.block_size as usize / 4;
+    let mut buf = vec![0u8; info.block_size as usize];
+    if read_block(file, info, block_num, &mut buf).is_err() { return; }
+    for i in 0..ptrs_per_block {
+        let ptr = u32::from_le_bytes([buf[i*4], buf[i*4+1], buf[i*4+2], buf[i*4+3]]);
+        if ptr != 0 { read_indirect_block(file, info, ptr as u64, blocks); }
+    }
+}
+
+fn read_triply_indirect(file: &mut File, info: &ExtInfo, block_num: u64, blocks: &mut Vec<u64>) {
+    let ptrs_per_block = info.block_size as usize / 4;
+    let mut buf = vec![0u8; info.block_size as usize];
+    if read_block(file, info, block_num, &mut buf).is_err() { return; }
+    for i in 0..ptrs_per_block {
+        let ptr = u32::from_le_bytes([buf[i*4], buf[i*4+1], buf[i*4+2], buf[i*4+3]]);
+        if ptr != 0 { read_doubly_indirect(file, info, ptr as u64, blocks); }
+    }
+}
+
+fn read_inode_blocks(file: &mut File, info: &ExtInfo, inode: &[u8]) -> Vec<u64> {
+    let mut blocks = Vec::new();
+    if inode.len() < 0x64 { return blocks; }
+
+    // Direct blocks (0-11)
+    for i in 0..12 {
+        let off = 0x28 + i * 4;
+        let block = u32::from_le_bytes([inode[off], inode[off+1], inode[off+2], inode[off+3]]);
+        if block != 0 { blocks.push(block as u64); }
+    }
+
+    // Singly indirect (i_block[12])
+    let si_off = 0x28 + 12 * 4;
+    let si_block = u32::from_le_bytes([inode[si_off], inode[si_off+1], inode[si_off+2], inode[si_off+3]]);
+    if si_block != 0 { read_indirect_block(file, info, si_block as u64, &mut blocks); }
+
+    // Doubly indirect (i_block[13])
+    let di_off = 0x28 + 13 * 4;
+    let di_block = u32::from_le_bytes([inode[di_off], inode[di_off+1], inode[di_off+2], inode[di_off+3]]);
+    if di_block != 0 { read_doubly_indirect(file, info, di_block as u64, &mut blocks); }
+
+    // Triply indirect (i_block[14])
+    let ti_off = 0x28 + 14 * 4;
+    let ti_block = u32::from_le_bytes([inode[ti_off], inode[ti_off+1], inode[ti_off+2], inode[ti_off+3]]);
+    if ti_block != 0 { read_triply_indirect(file, info, ti_block as u64, &mut blocks); }
+
     blocks
 }
 
@@ -131,7 +174,7 @@ fn scan_dir_block(
                 let sub_path = if current_path.is_empty() { name.clone() }
                     else { format!("{}/{}", current_path, name) };
                 if let Some(inode_data) = read_inode(file, info, inode) {
-                    let blocks = get_inode_blocks(&inode_data);
+                    let blocks = read_inode_blocks(file, info, &inode_data);
                     for &block in &blocks {
                         let mut dir_buf = vec![0u8; info.block_size as usize];
                         if read_block(file, info, block, &mut dir_buf).is_ok() {
@@ -153,7 +196,7 @@ pub fn scan(file: &mut File, info: &ExtInfo, results: &mut Vec<DeletedFile>) -> 
         None => return Err("Cannot read root inode".into()),
     };
 
-    let blocks = get_inode_blocks(&root_inode);
+    let blocks = read_inode_blocks(file, info, &root_inode);
     for &block in &blocks {
         let mut dir_buf = vec![0u8; info.block_size as usize];
         read_block(file, info, block, &mut dir_buf)?;
