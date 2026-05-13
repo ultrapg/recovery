@@ -321,7 +321,7 @@ pub fn scan(file: &mut File, info: &NtfsInfo, results: &mut Vec<DeletedFile>) ->
         let name = file_name.unwrap_or_else(|| format!("MFT_RECORD_{}", i));
         let start_address = if !data_runs.is_empty() {
             let (lcn, _) = data_runs[0];
-            lcn * info.bytes_per_sector as u64 * info.sectors_per_cluster as u64
+            info.partition_offset + lcn * info.bytes_per_sector as u64 * info.sectors_per_cluster as u64
         } else { 0 };
 
         let path = build_path(&dir_map, parent_record);
