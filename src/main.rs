@@ -171,7 +171,7 @@ fn print_help(exe: &str) {
         \n\
         OPTIONS:\n  --restore <INDEX>  Restore file at INDEX\n  --output <PATH>     Target path for restore\n  --search <NAME>     Search deleted files by name (case-insensitive, partial match)\n  --help, -h          Print help\n\
         \n\
-        EXAMPLES:\n  {} \\\\.\\E:\n  {} C:\n  {} C:\\Users\\Marvin\\Downloads\n  {} D: --search .docx\n  {} D: --search report --restore 0 --output recovered.docx\n  {} \\\\.\\PhysicalDrive0\n  {} /dev/sdb1\n",
+        EXAMPLES:\n  {} \\\\.\\E:\n  {} C:\n  {} C:\\Users\\User\\Downloads\n  {} D: --search .docx\n  {} D: --search report --restore 0 --output recovered.docx\n  {} \\\\.\\PhysicalDrive0\n  {} /dev/sdb1\n",
         exe, exe, exe, exe, exe, exe, exe, exe,
     );
 }
