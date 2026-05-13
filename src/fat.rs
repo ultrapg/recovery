@@ -215,7 +215,7 @@ fn scan_directory(
                 let start_cluster = get_cluster(&entry);
                 let start_addr = if start_cluster >= 2 {
                     let lba = fs.data_region_lba() + (start_cluster as u64 - 2) * fs.sectors_per_cluster as u64;
-                    lba * fs.bytes_per_sector as u64
+                    fs.partition_offset + lba * fs.bytes_per_sector as u64
                 } else { 0 };
                 let attr = entry[DIR_ATTR];
 
@@ -336,7 +336,7 @@ fn scan_directory_exfat(
 
                 let start_addr = if start_cluster_val >= 2 {
                     let lba = fs.cluster_heap_offset as u64 + (start_cluster_val as u64 - 2) * fs.sectors_per_cluster as u64;
-                    lba * fs.bytes_per_sector as u64
+                    fs.partition_offset + lba * fs.bytes_per_sector as u64
                 } else { 0 };
 
                 if name.is_empty() {
@@ -487,7 +487,7 @@ fn read_fat_entry(file: &mut File, fs: &Fat32Info, cluster: u32) -> Result<u32, 
 pub fn restore_fat32(
     file: &mut File, fs: &Fat32Info, entry: &DeletedFile, target_path: &str,
 ) -> Result<(), String> {
-    let data_start = fs.data_region_lba() * fs.bytes_per_sector as u64;
+    let data_start = fs.partition_offset + fs.data_region_lba() * fs.bytes_per_sector as u64;
     if entry.start_address < data_start {
         return Err(format!("Invalid start_address 0x{:X} (before data region)", entry.start_address));
     }
@@ -543,7 +543,7 @@ pub fn restore_exfat(
     file: &mut File, fs: &ExfatInfo, entry: &DeletedFile, target_path: &str,
 ) -> Result<(), String> {
     let cluster_size = fs.bytes_per_cluster() as usize;
-    let data_start = fs.cluster_heap_offset as u64 * fs.bytes_per_sector as u64;
+    let data_start = fs.partition_offset + fs.cluster_heap_offset as u64 * fs.bytes_per_sector as u64;
     if entry.start_address < data_start {
         return Err(format!("Invalid start_address 0x{:X} (before cluster heap)", entry.start_address));
     }
